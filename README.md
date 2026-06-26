@@ -61,6 +61,10 @@ Add-AppxPackage -Path "OpenAI.Codex_26.623.3763.0_x64__2p2nqsd0c76g0.Msix"
 .\extract-portable.ps1 -MsixPath "C:\Downloads\OpenAI.Codex_26.623.3763.0_x64__2p2nqsd0c76g0.Msix" -DestDir "D:\Apps\Codex"
 ```
 
+> ⚠️ 为什么不能直接把 MSIX 后缀改成 `.zip` 用 Windows 资源管理器解压？
+> 微软商店分发的 MSIX 内部基于 ZIP64，但通常**缺少标准 ZIP 的 End-of-Central-Directory 签名**（`PK\x05\x06`）。因此 Windows 资源管理器、PowerShell 的 `Expand-Archive`、Python `zipfile` 等会报错“不是有效的 zip 文件”。
+> 本脚本使用 Windows 10/11 自带的 `tar`（libarchive）或 7-Zip 进行解压，可以正确处理这种格式。
+
 脚本会：
 - 将 MSIX 解压到 `codex-portable`（默认）目录
 - 查找并列出所有可执行文件
