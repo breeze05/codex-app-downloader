@@ -61,9 +61,15 @@ Add-AppxPackage -Path "OpenAI.Codex_26.623.3763.0_x64__2p2nqsd0c76g0.Msix"
 .\extract-portable.ps1 -MsixPath "C:\Downloads\OpenAI.Codex_26.623.3763.0_x64__2p2nqsd0c76g0.Msix" -DestDir "D:\Apps\Codex"
 ```
 
+使用 Python 兜底方案（当 `tar` 和 7-Zip 都失败时）：
+
+```powershell
+.\extract-portable.ps1 -PythonFallback
+```
+
 > ⚠️ 为什么不能直接把 MSIX 后缀改成 `.zip` 用 Windows 资源管理器解压？
 > 微软商店分发的 MSIX 内部基于 ZIP64，但通常**缺少标准 ZIP 的 End-of-Central-Directory 签名**（`PK\x05\x06`）。因此 Windows 资源管理器、PowerShell 的 `Expand-Archive`、Python `zipfile` 等会报错“不是有效的 zip 文件”。
-> 本脚本使用 Windows 10/11 自带的 `tar`（libarchive）或 7-Zip 进行解压，可以正确处理这种格式。
+> `extract-portable.ps1` 会依次尝试 Windows 10/11 自带的 `tar`（libarchive）、7-Zip 以及 Python 扫描提取工具，可以正确处理这种格式。
 
 脚本会：
 - 将 MSIX 解压到 `codex-portable`（默认）目录
@@ -72,6 +78,21 @@ Add-AppxPackage -Path "OpenAI.Codex_26.623.3763.0_x64__2p2nqsd0c76g0.Msix"
 - 在桌面创建快捷方式
 
 > ⚠️ 注意：免安装方式无法使用 MSIX 的沙箱隔离、自动更新、应用商店集成等功能，部分特性可能受限。
+
+### 如果 7-Zip / tar 仍然无法解压
+
+请使用随项目附带的 Python 脚本，它通过扫描 local file header 直接提取文件，不依赖标准 ZIP 结构：
+
+```bash
+python repair_and_extract_msix.py OpenAI.Codex_26.623.3763.0_x64__2p2nqsd0c76g0.Msix -o codex-portable
+```
+
+也可以先“修复”为标准 ZIP 再解压（对部分 MSIX 有效）：
+
+```bash
+python repair_and_extract_msix.py OpenAI.Codex_26.623.3763.0_x64__2p2nqsd0c76g0.Msix --repair -o codex-fixed.zip
+unzip codex-fixed.zip -d codex-portable
+```
 
 ## 从 Release 直接下载
 
@@ -98,6 +119,7 @@ Add-AppxPackage -Path "OpenAI.Codex_26.623.3763.0_x64__2p2nqsd0c76g0.Msix"
 | `FE3FileUrl.xml` | FE3 GetExtendedUpdateInfo2 SOAP 请求模板 |
 | `install.ps1` | Windows 离线安装脚本 |
 | `extract-portable.ps1` | Windows 免安装解压脚本（MSIX 当作 ZIP） |
+| `repair_and_extract_msix.py` | Python 修复/提取工具（标准 ZIP 工具失败时使用） |
 
 ## 致谢
 

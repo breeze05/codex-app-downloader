@@ -9,8 +9,10 @@
     注意：
     - MSIX 内部基于 ZIP，但微软商店分发的 MSIX 通常使用 ZIP64 扩展，且缺少标准
       ZIP 的 End-of-Central-Directory 签名。因此 Windows 资源管理器、PowerShell 的
-      Expand-Archive、Python zipfile 等标准工具会报错“不是有效的 zip 文件”。
-    - 本脚本优先使用 Windows 10/11 自带的 tar（基于 libarchive/bsdtar）或 7-Zip 解压。
+      Expand-Archive、Python 的 zipfile 等标准工具会报错“不是有效的 zip 文件”。
+    - 本脚本优先使用 Windows 10/11 自带的 tar（基于 libarchive/bsdtar）解压；
+      如果 tar 失败，会尝试 7-Zip；如果 7-Zip 也失败，会尝试 Python 脚本
+      repair_and_extract_msix.py（通过扫描 local file header 直接提取）。
 
     免安装方式无法使用 MSIX 的沙箱隔离、自动更新等特性，部分功能可能受限。
 
@@ -19,6 +21,9 @@
 
 .PARAMETER DestDir
     解压目标目录。默认为脚本同目录下的 codex-portable 子文件夹。
+
+.PARAMETER PythonFallback
+    如果 tar 和 7-Zip 都失败，使用 Python 脚本作为最后兜底方案。需要 Python 3.7+。
 
 .EXAMPLE
     .\extract-portable.ps1
@@ -31,7 +36,8 @@
 
 param(
     [string]$MsixPath = "",
-    [string]$DestDir = ""
+    [string]$DestDir = "",
+    [switch]$PythonFallback = $false
 )
 
 $ErrorActionPreference = "Stop"
@@ -70,46 +76,132 @@ Write-Host ""
 
 # --- Extract ---
 if (Test-Path -LiteralPath $DestDir) {
-    Write-Host "[1/3] 目标目录已存在，正在清空..." -ForegroundColor Yellow
+    Write-Host "[1/4] 目标目录已存在，正在清空..." -ForegroundColor Yellow
     Remove-Item -LiteralPath $DestDir -Recurse -Force
 }
 
-Write-Host "[2/3] 正在解压 MSIX ..." -ForegroundColor Yellow
+Write-Host "[2/4] 正在解压 MSIX ..." -ForegroundColor Yellow
 New-Item -ItemType Directory -Path $DestDir -Force | Out-Null
 
 $extracted = $false
+$lastError = ""
 
-# 1. Try Windows built-in tar (libarchive/bsdtar) - best MSIX/ZIP64 support
-$tar = Get-Command -Name tar -ErrorAction SilentlyContinue
-if ($tar) {
-    Write-Host "  使用 tar (libarchive) 解压..." -ForegroundColor DarkYellow
-    $proc = Start-Process -FilePath $tar.Source -ArgumentList @("-xf", $MsixPath, "-C", $DestDir) -NoNewWindow -Wait -PassThru
-    if ($proc.ExitCode -eq 0 -or $proc.ExitCode -eq 1) {
-        # bsdtar may return 1 on non-fatal decompression errors
-        $extracted = $true
+function Run-External {
+    param(
+        [string]$FilePath,
+        [string]$Arguments,
+        [int[]]$SuccessCodes = @(0)
+    )
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = $FilePath
+    $psi.Arguments = $Arguments
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.UseShellExecute = $false
+    $psi.CreateNoWindow = $true
+    $proc = [System.Diagnostics.Process]::Start($psi)
+    $stdout = $proc.StandardOutput.ReadToEnd()
+    $stderr = $proc.StandardError.ReadToEnd()
+    $proc.WaitForExit()
+    return [PSCustomObject]@{
+        ExitCode = $proc.ExitCode
+        StdOut = $stdout
+        StdErr = $stderr
     }
 }
 
-# 2. Try 7-Zip
+# 1. Try Windows built-in tar (libarchive/bsdtar) - best MSIX/ZIP64 support
+$tar = Get-Command -Name tar -ErrorAction SilentlyContinue
+if ($tar -and -not $extracted) {
+    Write-Host "  尝试使用 tar (libarchive) 解压..." -ForegroundColor DarkYellow
+    $result = Run-External -FilePath $tar.Source -Arguments "-xf `"$MsixPath`" -C `"$DestDir`"" -SuccessCodes @(0, 1)
+    if ($result.ExitCode -eq 0 -or $result.ExitCode -eq 1) {
+        # bsdtar may return 1 on non-fatal decompression errors (e.g. tectonic.exe)
+        Write-Host "    tar 已返回（ExitCode=$($result.ExitCode)），视为解压完成。" -ForegroundColor Green
+        $extracted = $true
+    } else {
+        $lastError = "tar 失败: ExitCode=$($result.ExitCode)`nSTDOUT:`n$($result.StdOut)`nSTDERR:`n$($result.StdErr)"
+        Write-Host "    tar 无法解压: $lastError" -ForegroundColor Red
+    }
+}
+
+# 2. Try 7-Zip with multiple strategies
 if (-not $extracted) {
     $sevenZipPaths = @(
         "${env:ProgramFiles}\7-Zip\7z.exe",
         "${env:ProgramFiles(x86)}\7-Zip\7z.exe",
-        (Join-Path $env:LOCALAPPDATA "7-Zip\7z.exe")
+        (Join-Path $env:LOCALAPPDATA "7-Zip\7z.exe"),
+        "7z.exe"
     )
     foreach ($sevenZip in $sevenZipPaths) {
-        if (Test-Path -LiteralPath $sevenZip) {
-            Write-Host "  使用 7-Zip 解压：$sevenZip ..." -ForegroundColor DarkYellow
-            $proc = Start-Process -FilePath $sevenZip -ArgumentList @("x", $MsixPath, "-o$DestDir", "-y") -NoNewWindow -Wait -PassThru
-            if ($proc.ExitCode -eq 0) {
+        if ([string]::IsNullOrWhiteSpace($sevenZip)) { continue }
+        if ($sevenZip -eq "7z.exe") {
+            $sevenZipCmd = Get-Command -Name 7z -ErrorAction SilentlyContinue
+            if (-not $sevenZipCmd) { continue }
+            $sevenZip = $sevenZipCmd.Source
+        }
+        if (-not (Test-Path -LiteralPath $sevenZip)) { continue }
+
+        Write-Host "  尝试使用 7-Zip 解压：$sevenZip ..." -ForegroundColor DarkYellow
+
+        # 7-Zip 常见解压命令：x 保留路径，-tzip 强制按 zip 格式，-aou 自动重命名，-y 确认
+        $argumentSets = @(
+            "x `"$MsixPath`" -o`"$DestDir`" -y -tzip",
+            "x `"$MsixPath`" -o`"$DestDir`" -y",
+            "x `"$MsixPath`" -o`"$DestDir`" -aou -y -tzip",
+            "x `"$MsixPath`" -o`"$DestDir`" -aou -y"
+        )
+
+        foreach ($args in $argumentSets) {
+            $result = Run-External -FilePath $sevenZip -Arguments $args
+            if ($result.ExitCode -eq 0) {
+                Write-Host "    7-Zip 解压成功。" -ForegroundColor Green
                 $extracted = $true
                 break
             }
         }
+
+        if ($extracted) { break }
+
+        # 如果都失败，打印最后一次错误
+        $lastError = "7-Zip 失败: ExitCode=$($result.ExitCode)`nSTDOUT:`n$($result.StdOut)`nSTDERR:`n$($result.StdErr)"
+        Write-Host "    7-Zip 无法解压: $lastError" -ForegroundColor Red
     }
 }
 
-# 3. Last resort: .NET ZipFile / Expand-Archive (unlikely to work for store MSIX)
+# 3. Python fallback: repair_and_extract_msix.py
+if (-not $extracted -and $PythonFallback) {
+    Write-Host "  尝试使用 Python 脚本扫描提取（不依赖标准 ZIP 结构）..." -ForegroundColor DarkYellow
+
+    $python = Get-Command -Name python -ErrorAction SilentlyContinue
+    if (-not $python) { $python = Get-Command -Name python3 -ErrorAction SilentlyContinue }
+    if (-not $python) { $python = Get-Command -Name py -ErrorAction SilentlyContinue }
+
+    if ($python) {
+        $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+        $pyScript = Join-Path $scriptDir "repair_and_extract_msix.py"
+        if (-not (Test-Path -LiteralPath $pyScript)) {
+            $pyScript = Join-Path (Get-Location) "repair_and_extract_msix.py"
+        }
+
+        if (Test-Path -LiteralPath $pyScript) {
+            $result = Run-External -FilePath $python.Source -Arguments "`"$pyScript`" `"$MsixPath`" -o `"$DestDir`""
+            if ($result.ExitCode -eq 0) {
+                Write-Host "    Python 扫描提取成功。" -ForegroundColor Green
+                $extracted = $true
+            } else {
+                $lastError = "Python 脚本失败: ExitCode=$($result.ExitCode)`nSTDOUT:`n$($result.StdOut)`nSTDERR:`n$($result.StdErr)"
+                Write-Host "    $lastError" -ForegroundColor Red
+            }
+        } else {
+            Write-Host "    未找到 repair_and_extract_msix.py，跳过 Python 兜底。" -ForegroundColor Red
+        }
+    } else {
+        Write-Host "    未找到 Python 解释器，跳过 Python 兜底。" -ForegroundColor Red
+    }
+}
+
+# 4. Last resort: .NET ZipFile (unlikely to work for store MSIX)
 if (-not $extracted) {
     Write-Host "  尝试使用 .NET ZipFile 解压（多数商店 MSIX 会失败）..." -ForegroundColor DarkYellow
     try {
@@ -117,17 +209,36 @@ if (-not $extracted) {
         [System.IO.Compression.ZipFile]::ExtractToDirectory($MsixPath, $DestDir)
         $extracted = $true
     } catch {
-        Write-Host "  .NET ZipFile 失败：$_" -ForegroundColor Red
-        Write-Host "  请安装 7-Zip (https://www.7-zip.org/) 后重试。" -ForegroundColor Red
-        throw "无法解压此 MSIX 文件。标准 ZIP 工具不支持该文件的 ZIP64 格式。"
+        $lastError = $_.ToString()
+        Write-Host "    .NET ZipFile 失败：$lastError" -ForegroundColor Red
     }
 }
 
-Write-Host "[3/3] 解压完成！" -ForegroundColor Green
+if (-not $extracted) {
+    Write-Host ""
+    Write-Host "==========================================" -ForegroundColor Red
+    Write-Host "  所有解压方式都失败了" -ForegroundColor Red
+    Write-Host "==========================================" -ForegroundColor Red
+    Write-Host ""
+    Write-Host "可能原因：" -ForegroundColor Yellow
+    Write-Host "  - 7-Zip 版本较旧，不支持该 MSIX 的 ZIP64 变体。" -ForegroundColor Yellow
+    Write-Host "  - 文件在传输过程中损坏。" -ForegroundColor Yellow
+    Write-Host "  - 该 MSIX 使用了更特殊的压缩/封装格式。" -ForegroundColor Yellow
+    Write-Host ""
+    Write-Host "建议尝试：" -ForegroundColor Yellow
+    Write-Host "  1. 升级 7-Zip 到最新版（https://www.7-zip.org/）。" -ForegroundColor Yellow
+    Write-Host "  2. 安装 Python 3.7+，然后运行：" -ForegroundColor Yellow
+    Write-Host "       python repair_and_extract_msix.py `"$MsixPath`" -o `"$DestDir`"" -ForegroundColor Cyan
+    Write-Host "  3. 重新从 GitHub Release 下载 MSIX，确保 SHA256 一致。" -ForegroundColor Yellow
+    Write-Host ""
+    throw "无法解压此 MSIX 文件。详情请参见上述错误信息。"
+}
+
+Write-Host "[3/4] 解压完成！" -ForegroundColor Green
 
 # --- Find executable ---
 Write-Host ""
-Write-Host "查找可执行文件..." -ForegroundColor Cyan
+Write-Host "[4/4] 查找可执行文件..." -ForegroundColor Cyan
 
 $exeFiles = Get-ChildItem -Path $DestDir -Filter "*.exe" -File -Recurse -ErrorAction SilentlyContinue
 
@@ -165,5 +276,5 @@ Write-Host "==========================================" -ForegroundColor Cyan
 Write-Host "  解压完成！解压目录：$DestDir" -ForegroundColor Green
 Write-Host "==========================================" -ForegroundColor Cyan
 Write-Host ""
-Write-Host "提示：如果 tar 解压报错但生成了文件，通常可以忽略非主程序文件的解压错误。" -ForegroundColor DarkYellow
+Write-Host "提示：如果 tar 或 7-Zip 解压时报错但生成了文件，通常可以忽略非主程序文件的解压错误。" -ForegroundColor DarkYellow
 Write-Host ""
