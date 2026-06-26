@@ -31,15 +31,18 @@ python3 download-codex-msix.py --architecture x64 --output ./downloads
 - `--language`：语言（默认 `en`）
 - `--force`：覆盖已下载的文件
 
-### 在 Windows 上离线安装
+### 在 Windows 上离线安装（可能需要管理员权限）
 
 1. 将下载的 MSIX 文件和 `install.ps1` 复制到 Windows 电脑
-2. 以管理员身份打开 PowerShell
-3. 运行安装脚本：
+2. 运行安装脚本：
 
 ```powershell
 .\install.ps1
 ```
+
+权限说明：
+- 在大多数 Windows 10/11 家庭版/专业版上，`Add-AppxPackage` 可以为当前用户安装应用包，**不一定需要管理员权限**。
+- 但在企业环境、组策略限制旁加载（sideloading）或 Developer mode 未开启的电脑上，可能需要**以管理员身份运行 PowerShell**。
 
 或手动安装：
 
@@ -47,13 +50,15 @@ python3 download-codex-msix.py --architecture x64 --output ./downloads
 Add-AppxPackage -Path "OpenAI.Codex_26.623.3763.0_x64__2p2nqsd0c76g0.Msix"
 ```
 
-### 在 Windows 上免安装运行（当作 ZIP 解压）
+### 在 Windows 上免安装运行（推荐无管理员权限场景）
 
-如果你不想通过 `Add-AppxPackage` 注册应用，或没有管理员权限，可以运行免安装脚本，将 MSIX 直接解压到目录：
+如果你没有管理员权限，或者 `install.ps1` 安装失败，推荐直接使用免安装脚本，将 MSIX 当作 ZIP 解压到当前用户有权限的目录：
 
 ```powershell
 .\extract-portable.ps1
 ```
+
+默认解压到脚本同目录的 `codex-portable` 文件夹，运行后进入该目录启动 `app/Codex.exe` 即可。
 
 可选参数：
 
