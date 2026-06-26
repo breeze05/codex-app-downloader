@@ -47,6 +47,28 @@ python3 download-codex-msix.py --architecture x64 --output ./downloads
 Add-AppxPackage -Path "OpenAI.Codex_26.623.3763.0_x64__2p2nqsd0c76g0.Msix"
 ```
 
+### 在 Windows 上免安装运行（当作 ZIP 解压）
+
+如果你不想通过 `Add-AppxPackage` 注册应用，或没有管理员权限，可以运行免安装脚本，将 MSIX 直接解压到目录：
+
+```powershell
+.\extract-portable.ps1
+```
+
+可选参数：
+
+```powershell
+.\extract-portable.ps1 -MsixPath "C:\Downloads\OpenAI.Codex_26.623.3763.0_x64__2p2nqsd0c76g0.Msix" -DestDir "D:\Apps\Codex"
+```
+
+脚本会：
+- 将 MSIX 解压到 `codex-portable`（默认）目录
+- 查找并列出所有可执行文件
+- 推荐主入口程序
+- 在桌面创建快捷方式
+
+> ⚠️ 注意：免安装方式无法使用 MSIX 的沙箱隔离、自动更新、应用商店集成等功能，部分特性可能受限。
+
 ## 从 Release 直接下载
 
 如果你只需要安装包，可以直接从本项目的 [Releases](https://github.com/breeze05/codex-app-downloader/releases) 页面下载最新的 MSIX 文件，无需运行脚本。
@@ -71,6 +93,7 @@ Add-AppxPackage -Path "OpenAI.Codex_26.623.3763.0_x64__2p2nqsd0c76g0.Msix"
 | `WUIDRequest.xml` | FE3 SyncUpdates SOAP 请求模板 |
 | `FE3FileUrl.xml` | FE3 GetExtendedUpdateInfo2 SOAP 请求模板 |
 | `install.ps1` | Windows 离线安装脚本 |
+| `extract-portable.ps1` | Windows 免安装解压脚本（MSIX 当作 ZIP） |
 
 ## 致谢
 
