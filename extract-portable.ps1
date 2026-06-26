@@ -1,12 +1,18 @@
 <#
 .SYNOPSIS
-    免安装方式使用 OpenAI Codex App — 将 MSIX 当作 ZIP 解压到目标目录。
+    免安装方式使用 OpenAI Codex App — 将 MSIX 解压到目标目录。
 
 .DESCRIPTION
-    MSIX 本质是 ZIP 压缩包。本脚本将其解压到指定目录，无需通过 Add-AppxPackage 安装。
+    本脚本把 MSIX 包解压到指定目录，无需通过 Add-AppxPackage 安装。
     解压后可直接运行目录内的可执行文件，适合无管理员权限或不想注册应用包的场景。
 
-    注意：免安装方式无法使用 MSIX 的沙箱隔离、自动更新等特性，部分功能可能受限。
+    注意：
+    - MSIX 内部基于 ZIP，但微软商店分发的 MSIX 通常使用 ZIP64 扩展，且缺少标准
+      ZIP 的 End-of-Central-Directory 签名。因此 Windows 资源管理器、PowerShell 的
+      Expand-Archive、Python zipfile 等标准工具会报错“不是有效的 zip 文件”。
+    - 本脚本优先使用 Windows 10/11 自带的 tar（基于 libarchive/bsdtar）或 7-Zip 解压。
+
+    免安装方式无法使用 MSIX 的沙箱隔离、自动更新等特性，部分功能可能受限。
 
 .PARAMETER MsixPath
     MSIX 文件路径。默认为脚本同目录下的 .msix 文件。
@@ -71,20 +77,49 @@ if (Test-Path -LiteralPath $DestDir) {
 Write-Host "[2/3] 正在解压 MSIX ..." -ForegroundColor Yellow
 New-Item -ItemType Directory -Path $DestDir -Force | Out-Null
 
-# MSIX is a ZIP; use System.IO.Compression to extract
-Add-Type -AssemblyName System.IO.Compression.FileSystem
+$extracted = $false
 
-try {
-    [System.IO.Compression.ZipFile]::ExtractToDirectory($MsixPath, $DestDir)
-} catch {
-    # Fallback: use Expand-Archive (rename to .zip first)
-    Write-Host "  System.IO.Compression 失败，尝试 Expand-Archive 备选方案..." -ForegroundColor DarkYellow
-    $tempZip = [System.IO.Path]::ChangeExtension($MsixPath, ".zip")
-    Copy-Item -LiteralPath $MsixPath -Destination $tempZip -Force
+# 1. Try Windows built-in tar (libarchive/bsdtar) - best MSIX/ZIP64 support
+$tar = Get-Command -Name tar -ErrorAction SilentlyContinue
+if ($tar) {
+    Write-Host "  使用 tar (libarchive) 解压..." -ForegroundColor DarkYellow
+    $proc = Start-Process -FilePath $tar.Source -ArgumentList @("-xf", $MsixPath, "-C", $DestDir) -NoNewWindow -Wait -PassThru
+    if ($proc.ExitCode -eq 0 -or $proc.ExitCode -eq 1) {
+        # bsdtar may return 1 on non-fatal decompression errors
+        $extracted = $true
+    }
+}
+
+# 2. Try 7-Zip
+if (-not $extracted) {
+    $sevenZipPaths = @(
+        "${env:ProgramFiles}\7-Zip\7z.exe",
+        "${env:ProgramFiles(x86)}\7-Zip\7z.exe",
+        (Join-Path $env:LOCALAPPDATA "7-Zip\7z.exe")
+    )
+    foreach ($sevenZip in $sevenZipPaths) {
+        if (Test-Path -LiteralPath $sevenZip) {
+            Write-Host "  使用 7-Zip 解压：$sevenZip ..." -ForegroundColor DarkYellow
+            $proc = Start-Process -FilePath $sevenZip -ArgumentList @("x", $MsixPath, "-o$DestDir", "-y") -NoNewWindow -Wait -PassThru
+            if ($proc.ExitCode -eq 0) {
+                $extracted = $true
+                break
+            }
+        }
+    }
+}
+
+# 3. Last resort: .NET ZipFile / Expand-Archive (unlikely to work for store MSIX)
+if (-not $extracted) {
+    Write-Host "  尝试使用 .NET ZipFile 解压（多数商店 MSIX 会失败）..." -ForegroundColor DarkYellow
     try {
-        Expand-Archive -LiteralPath $tempZip -DestinationPath $DestDir -Force
-    } finally {
-        Remove-Item -LiteralPath $tempZip -Force -ErrorAction SilentlyContinue
+        Add-Type -AssemblyName System.IO.Compression.FileSystem
+        [System.IO.Compression.ZipFile]::ExtractToDirectory($MsixPath, $DestDir)
+        $extracted = $true
+    } catch {
+        Write-Host "  .NET ZipFile 失败：$_" -ForegroundColor Red
+        Write-Host "  请安装 7-Zip (https://www.7-zip.org/) 后重试。" -ForegroundColor Red
+        throw "无法解压此 MSIX 文件。标准 ZIP 工具不支持该文件的 ZIP64 格式。"
     }
 }
 
@@ -95,21 +130,6 @@ Write-Host ""
 Write-Host "查找可执行文件..." -ForegroundColor Cyan
 
 $exeFiles = Get-ChildItem -Path $DestDir -Filter "*.exe" -File -Recurse -ErrorAction SilentlyContinue
-$appxManifest = Get-ChildItem -Path $DestDir -Filter "AppxManifest.xml" -File -ErrorAction SilentlyContinue | Select-Object -First 1
-
-if ($appxManifest) {
-    Write-Host ""
-    Write-Host "  应用清单: $($appxManifest.FullName)" -ForegroundColor Green
-    try {
-        [xml]$manifest = Get-Content -Raw -LiteralPath $appxManifest.FullName
-        $appId = $manifest.Package.Applications.Application.Id
-        $appExe = $manifest.Package.Applications.Application.Executable
-        Write-Host "  应用 ID  : $appId" -ForegroundColor Green
-        Write-Host "  可执行文件: $appExe" -ForegroundColor Green
-    } catch {
-        Write-Host "  (无法解析 AppxManifest.xml)" -ForegroundColor DarkYellow
-    }
-}
 
 if ($exeFiles) {
     Write-Host ""
@@ -119,8 +139,9 @@ if ($exeFiles) {
         Write-Host "    $relPath" -ForegroundColor White
     }
 
-    # Highlight the main application executable
-    $mainExe = $exeFiles | Where-Object { $_.Name -match 'codex' } | Select-Object -First 1
+    # The main executable is usually Codex.exe inside the app folder
+    $mainExe = $exeFiles | Where-Object { $_.Name -ieq 'Codex.exe' } | Select-Object -First 1
+    if (-not $mainExe) { $mainExe = $exeFiles | Where-Object { $_.Name -match 'codex' } | Select-Object -First 1 }
     if (-not $mainExe) { $mainExe = $exeFiles | Select-Object -First 1 }
 
     Write-Host ""
@@ -143,4 +164,6 @@ Write-Host ""
 Write-Host "==========================================" -ForegroundColor Cyan
 Write-Host "  解压完成！解压目录：$DestDir" -ForegroundColor Green
 Write-Host "==========================================" -ForegroundColor Cyan
+Write-Host ""
+Write-Host "提示：如果 tar 解压报错但生成了文件，通常可以忽略非主程序文件的解压错误。" -ForegroundColor DarkYellow
 Write-Host ""
